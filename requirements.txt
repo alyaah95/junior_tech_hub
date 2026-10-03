@@ -1,0 +1,10 @@
+playwright
+parsel
+requests
+feedparser
+pydantic
+psycopg2-binary
+python-dotenv
+beautifulsoup4
+feedparser
+google-genai
