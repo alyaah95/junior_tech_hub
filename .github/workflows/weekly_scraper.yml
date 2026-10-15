@@ -3,7 +3,7 @@ name: Weekly Job Scraper Pipeline
 on:
   schedule:
     # يشتغل كل يوم أحد الساعة 8 صباحاً بتوقيت UTC (تقدر تكتبي أي توقيت)
-    - cron: '0 8 * * 0'
+    - cron: '45 12 * * 4'
   workflow_dispatch: # يخليكِ تقدي تشغليه يدوياً في أي وقت من زرار في GitHub
 
 jobs:
