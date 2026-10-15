@@ -316,7 +316,7 @@ class WuzzufExtractor(BaseExtractor):
                 )
                 
                 page = context.new_page()
-                page.route("**/*", self._block_unnecessary_resources)
+                # page.route("**/*", self._block_unnecessary_resources)
                 self._apply_stealth(page)
 
                 for url_index, search_url in enumerate(self.search_urls, start=1):
