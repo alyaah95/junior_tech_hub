@@ -359,12 +359,12 @@ class WuzzufExtractor(BaseExtractor):
                         if page_num > 1:
                             try:
                                 time.sleep(get_random_delay(2.5, 4.0))
-                                page.goto(current_url, wait_until="load", timeout=45000)
+                                page.goto(current_url, wait_until="domcontentloaded", timeout=45000)
                                 self._handle_cloudflare(page)
                                 self._simulate_human_behavior(page)
 
                                 try:
-                                    page.wait_for_selector("a[href*='/jobs/p/']", timeout=20000)
+                                    page.wait_for_selector("a[href*='/jobs/p/']", timeout=25000)
                                 except Exception:
                                     if self._handle_cloudflare(page):
                                         try:
