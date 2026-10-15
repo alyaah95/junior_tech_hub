@@ -27,11 +27,20 @@ jobs:
 
       - name: Run Pipeline
         env:
-          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          # متغيرات قاعدة البيانات المطابقة للصورة
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          
+          # متغيرات التليجرام المطابقة للصورة
+          PUBLIC_BOT_TOKEN: ${{ secrets.PUBLIC_BOT_TOKEN }}
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           ADMIN_BOT_TOKEN: ${{ secrets.ADMIN_BOT_TOKEN }}
           ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
+          
+          # توكن الـ AI
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           python main.py
