@@ -1,0 +1,37 @@
+name: Weekly Job Scraper Pipeline
+
+on:
+  schedule:
+    # يشتغل كل يوم أحد الساعة 8 صباحاً بتوقيت UTC (تقدر تكتبي أي توقيت)
+    - cron: '0 8 * * 0'
+  workflow_dispatch: # يخليكِ تقدي تشغليه يدوياً في أي وقت من زرار في GitHub
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Run Pipeline
+        env:
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          ADMIN_BOT_TOKEN: ${{ secrets.ADMIN_BOT_TOKEN }}
+          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          python main.py
