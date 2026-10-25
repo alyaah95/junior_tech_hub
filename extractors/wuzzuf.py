@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import math
+import os
+from pathlib import Path
 import re
 import time
 import random
@@ -29,6 +31,14 @@ def get_random_delay(min_sec=2.0, max_sec=4.0):
 
 
 class WuzzufExtractor(BaseExtractor):
+
+    CARD_SELECTOR = "a[href*='/jobs/p/']"
+    CHALLENGE_TITLES = (
+        "just a moment", 
+        "cloudflare", 
+        "attention required", 
+        "checking your browser"
+    )
 
     def __init__(self, search_urls: Optional[List[str]] = None):
         super().__init__(source_name="Wuzzuf")
@@ -69,24 +79,37 @@ class WuzzufExtractor(BaseExtractor):
             parsed.params, new_query, parsed.fragment
         ))
 
+    # ---------- Context & Stealth Setup ----------
+
+    def _build_context(self, browser):
+        proxy_url = os.getenv("WUZZUF_PROXY")
+        kwargs = dict(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1366, "height": 768},
+            locale="en-US",
+            timezone_id="Africa/Cairo",
+        )
+        if proxy_url:
+            kwargs["proxy"] = {"server": proxy_url}
+        return browser.new_context(**kwargs)
+
     def _apply_stealth(self, page):
         if stealth_sync:
             try:
                 stealth_sync(page)
             except Exception as e:
                 logger.debug(f"Could not apply stealth_sync: {e}")
-        
-        page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en', 'ar'] });
-            window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
-        """)
 
-    def _block_unnecessary_resources(self, route):
-        if route.request.resource_type in ["image", "media", "font"]:
-            route.abort()
-        else:
-            route.continue_()
+    def _route_handler(self, route):
+        req = route.request
+        if "/cdn-cgi/" in req.url or "challenges.cloudflare.com" in req.url:
+            return route.continue_()
+        if req.resource_type in ("image", "media", "font"):
+            return route.abort()
+        return route.continue_()
 
     def _simulate_human_behavior(self, page):
         try:
@@ -100,21 +123,62 @@ class WuzzufExtractor(BaseExtractor):
         except Exception:
             pass
 
-    def _handle_cloudflare(self, page, wait_ms: int = 10000) -> bool:
-        try:
-            title = page.title()
-        except Exception:
-            return False
+    # ---------- Challenge & Hydration Handling ----------
 
-        if any(term in title for term in ["Just a moment", "Cloudflare", "Attention Required", "Checking your browser"]):
-            logger.warning("Cloudflare challenge detected! Waiting for bypass...")
-            page.wait_for_timeout(wait_ms)
+    def _is_challenge(self, page) -> bool:
+        try:
+            title = (page.title() or "").lower()
+        except Exception:
+            return True
+        return any(t in title for t in self.CHALLENGE_TITLES)
+
+    def _save_debug(self, page, tag: str):
+        try:
+            out = Path("debug_artifacts")
+            out.mkdir(exist_ok=True)
+            page.screenshot(path=str(out / f"{tag}.png"), full_page=True)
+            (out / f"{tag}.html").write_text(page.content(), encoding="utf-8")
+        except Exception as e:
+            logger.debug(f"Could not save debug artifacts: {e}")
+
+    def _wait_for_job_cards(self, page, timeout_ms: int = 60000) -> bool:
+        deadline = time.monotonic() + timeout_ms / 1000
+        logged = False
+        while time.monotonic() < deadline:
+            if self._is_challenge(page):
+                if not logged:
+                    logger.warning("Cloudflare challenge page present; waiting for it to resolve...")
+                    logged = True
+                page.wait_for_timeout(1500)
+                continue
             try:
-                page.wait_for_load_state("networkidle", timeout=15000)
+                page.wait_for_selector(self.CARD_SELECTOR, state="attached", timeout=3000)
+                n1 = page.locator(self.CARD_SELECTOR).count()
+                page.wait_for_timeout(800)
+                n2 = page.locator(self.CARD_SELECTOR).count()
+                if n1 and n1 == n2:
+                    return True
             except Exception:
                 pass
-            return True
         return False
+
+    def _load_listing_page(self, page, url: str, tag: str, retries: int = 2) -> str:
+        for attempt in range(1, retries + 2):
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            except Exception as e:
+                logger.warning(f"[{tag}] goto failed (attempt {attempt}): {e}")
+            self._simulate_human_behavior(page)
+
+            if self._wait_for_job_cards(page):
+                return page.content()
+
+            logger.warning(f"[{tag}] No job cards after attempt {attempt}/{retries + 1}.")
+            self._save_debug(page, f"{tag}_attempt{attempt}")
+            time.sleep(get_random_delay(4.0, 8.0))
+        return ""
+
+    # ---------- Filters & Parsing ----------
 
     def _is_title_allowed(self, title: str) -> bool:
         title_clean = title.lower()
@@ -177,8 +241,8 @@ class WuzzufExtractor(BaseExtractor):
     def _extract_job_id(self, url: str) -> str:
         match = re.search(r"/jobs/p/([a-zA-Z0-9-]+)", url)
         if match:
-            return match.group(1)
-        return url
+            return match.group(1)[:150]
+        return url[:150]
 
     def _parse_html_to_raw_jobs(self, html_content: str) -> List[Dict[str, Any]]:
         raw_jobs = []
@@ -190,23 +254,19 @@ class WuzzufExtractor(BaseExtractor):
             raw_link = link_node.xpath(".//@href").get("")
             title = link_node.xpath(".//text()").get("").strip()
 
-            # CRITICAL FIELD: job_link
             if not raw_link:
                 self.alert_manager.send_critical_alert(
                     source=self.source_name,
                     field="job_link",
-                    details="Could not extract 'href' from a job card anchor matching '/jobs/p/'. "
-                            "The site's link structure may have changed."
+                    details="Could not extract 'href' from a job card anchor matching '/jobs/p/'."
                 )
                 raise CriticalSelectorError(source=self.source_name, field="job_link")
 
-            # CRITICAL FIELD: title
             if not title or len(title) < 3:
                 self.alert_manager.send_critical_alert(
                     source=self.source_name,
                     field="title",
-                    details=f"Could not extract a valid title for job link '{raw_link}'. "
-                            "The site's title selector may have changed."
+                    details=f"Could not extract a valid title for job link '{raw_link}'."
                 )
                 raise CriticalSelectorError(source=self.source_name, field="title")
 
@@ -220,7 +280,6 @@ class WuzzufExtractor(BaseExtractor):
             if not card:
                 card = link_node.xpath("./ancestor::div[2]")
 
-            # NON-CRITICAL FIELD: company
             company = card.xpath(".//a[contains(@href, '/jobs/careers/')]/text()").get()
             if not company:
                 logger.warning(f"[{self.source_name}] Non-critical field 'company' missing for job '{title}'. Defaulting to 'N/A'.")
@@ -228,14 +287,12 @@ class WuzzufExtractor(BaseExtractor):
             else:
                 company = company.strip()
 
-            # NON-CRITICAL FIELD: location
             loc_parts = card.xpath(".//a[contains(@href, '/jobs/careers/')]/following-sibling::span//text() | .//span[contains(text(), 'Egypt') or contains(text(), 'Cairo') or contains(text(), 'Alexandria')]//text()").getall()
             location = ", ".join([p.strip() for p in loc_parts if p.strip() and p.strip() != "-"]) if loc_parts else ""
             if not location:
                 logger.warning(f"[{self.source_name}] Non-critical field 'location' missing for job '{title}'. Defaulting to 'N/A'.")
                 location = "N/A"
 
-            # NON-CRITICAL FIELD: job_type
             badges_text = " ".join([b.strip().lower() for b in card.xpath(".//a/span/text()").getall()])
             if "remote" in badges_text or "work from home" in badges_text or "عن بعد" in badges_text:
                 job_type = "Remote"
@@ -247,14 +304,12 @@ class WuzzufExtractor(BaseExtractor):
                 logger.warning(f"[{self.source_name}] Non-critical field 'job_type' could not be determined for job '{title}'. Defaulting to 'N/A'.")
                 job_type = "N/A"
 
-            # CRITICAL FIELD: posted_at
             posted_at = card.xpath(".//div[contains(text(), 'ago') or contains(text(), 'just now')]/text()").get("").strip()
             if not posted_at:
                 self.alert_manager.send_critical_alert(
                     source=self.source_name,
                     field="posted_at",
-                    details=f"Could not extract 'posted_at' for job '{title}' ({job_link}). "
-                            "The site's date selector may have changed."
+                    details=f"Could not extract 'posted_at' for job '{title}' ({job_link})."
                 )
                 raise CriticalSelectorError(source=self.source_name, field="posted_at")
 
@@ -264,13 +319,11 @@ class WuzzufExtractor(BaseExtractor):
             card_texts = card.xpath(".//text()").getall()
             clean_card_text = " ".join([t.strip() for t in card_texts if t.strip()])
 
-            # CRITICAL FIELD: description
             if not clean_card_text:
                 self.alert_manager.send_critical_alert(
                     source=self.source_name,
                     field="description",
-                    details=f"Could not extract any card text for job '{title}' ({job_link}). "
-                            "The card's text-level selector may have changed."
+                    details=f"Could not extract any card text for job '{title}' ({job_link})."
                 )
                 raise CriticalSelectorError(source=self.source_name, field="description")
 
@@ -289,130 +342,83 @@ class WuzzufExtractor(BaseExtractor):
             })
         return raw_jobs
 
+    # ---------- Main Extraction Flow ----------
+
     def extract(self) -> List[Dict[str, Any]]:
-        all_raw_jobs = []
-        seen_job_ids = set()
+        all_raw_jobs, seen_job_ids = [], set()
+        headless = os.getenv("WUZZUF_HEADLESS", "1") != "0"
 
         logger.info(f"=== Starting Wuzzuf Scraping for {len(self.search_urls)} Search URLs ===")
 
         with sync_playwright() as p:
             browser = p.chromium.launch(
-                headless=True,
+                headless=headless,
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-infobars",
                     "--window-size=1366,768"
-                ]
+                ],
             )
-
             try:
-                context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                    viewport={"width": 1366, "height": 768},
-                    locale="en-US",
-                    timezone_id="Africa/Cairo"
-                )
-                
+                context = self._build_context(browser)
                 page = context.new_page()
-                # page.route("**/*", self._block_unnecessary_resources)
+                page.route("**/*", self._route_handler)
                 self._apply_stealth(page)
 
                 for url_index, search_url in enumerate(self.search_urls, start=1):
                     if url_index > 1:
                         time.sleep(get_random_delay(3.0, 5.0))
 
-                    first_page_url = self._build_page_url(search_url, 1)
-                    try:
-                        page.goto(first_page_url, wait_until="load", timeout=60000)
-                        self._handle_cloudflare(page)
-                        self._simulate_human_behavior(page)
+                    first_html = self._load_listing_page(
+                        page, self._build_page_url(search_url, 1), f"url{url_index}_p1"
+                    )
+                    
+                    if not first_html:
+                        logger.error(
+                            f"URL [{url_index}] blocked or never rendered; skipping. "
+                            "Check debug_artifacts/ and runner IP."
+                        )
+                        continue
 
-                        try:
-                            page.wait_for_selector("a[href*='/jobs/p/']", timeout=20000)
-                        except Exception:
-                            if self._handle_cloudflare(page):
-                                try:
-                                    page.wait_for_selector("a[href*='/jobs/p/']", timeout=15000)
-                                except Exception:
-                                    pass
-                    except Exception as e:
-                        logger.warning(f"Error loading first page ({first_page_url}): {e}")
-
-                    first_html = ""
-                    try:
-                        page.wait_for_load_state("domcontentloaded", timeout=5000)
-                        first_html = page.content()
-                    except Exception:
-                        try:
-                            first_html = page.content()
-                        except Exception:
-                            first_html = ""
-
-                    first_selector = Selector(text=first_html)
-                    total_pages = self._get_total_pages(first_selector)
+                    total_pages = self._get_total_pages(Selector(text=first_html))
 
                     for page_num in range(1, total_pages + 1):
-                        current_url = self._build_page_url(search_url, page_num)
-
-                        if page_num > 1:
-                            try:
-                                time.sleep(get_random_delay(2.5, 4.0))
-                                page.goto(current_url, wait_until="domcontentloaded", timeout=45000)
-                                self._handle_cloudflare(page)
-                                self._simulate_human_behavior(page)
-
-                                try:
-                                    page.wait_for_selector("a[href*='/jobs/p/']", timeout=25000)
-                                except Exception:
-                                    if self._handle_cloudflare(page):
-                                        try:
-                                            page.wait_for_selector("a[href*='/jobs/p/']", timeout=15000)
-                                        except Exception:
-                                            pass
-
-                                page.wait_for_load_state("domcontentloaded", timeout=5000)
-                                html_content = page.content()
-                            except Exception as e:
-                                time.sleep(2)
-                                try:
-                                    self._handle_cloudflare(page)
-                                    html_content = page.content()
-                                except Exception:
-                                    html_content = ""
-                        else:
+                        if page_num == 1:
                             html_content = first_html
+                        else:
+                            time.sleep(get_random_delay(2.5, 4.0))
+                            html_content = self._load_listing_page(
+                                page, self._build_page_url(search_url, page_num),
+                                f"url{url_index}_p{page_num}"
+                            )
+                            if not html_content:
+                                break
 
-                        if html_content:
-                            raw_jobs = self._parse_html_to_raw_jobs(html_content)
+                        added = 0
+                        for job in self._parse_html_to_raw_jobs(html_content):
+                            if job["job_id"] not in seen_job_ids:
+                                seen_job_ids.add(job["job_id"])
+                                all_raw_jobs.append(job)
+                                added += 1
 
-                            if not raw_jobs and page_num > 1:
-                                if self._handle_cloudflare(page):
-                                    time.sleep(get_random_delay(2.0, 3.0))
-                                    try:
-                                        page.reload(wait_until="load", timeout=45000)
-                                        self._handle_cloudflare(page)
-                                        page.wait_for_selector("a[href*='/jobs/p/']", timeout=15000)
-                                        html_content = page.content()
-                                        raw_jobs = self._parse_html_to_raw_jobs(html_content)
-                                    except Exception:
-                                        pass
-
-                                if not raw_jobs:
-                                    break
-
-                            page_jobs_added = 0
-                            for job in raw_jobs:
-                                if job["job_id"] not in seen_job_ids:
-                                    seen_job_ids.add(job["job_id"])
-                                    all_raw_jobs.append(job)
-                                    page_jobs_added += 1
-
-                            logger.info(f"URL [{url_index}/{len(self.search_urls)}] | Page {page_num}/{total_pages}: Extracted {page_jobs_added} new jobs.")
-
+                        logger.info(
+                            f"URL [{url_index}/{len(self.search_urls)}] | "
+                            f"Page {page_num}/{total_pages}: Extracted {added} new jobs."
+                        )
             finally:
                 browser.close()
+
+        # Graceful Handling: إرسال تنبيه واستمرار باقي السكريبتات بدلاً من إيقاف السلسلة بالكامل
+        if not all_raw_jobs:
+            logger.error("Wuzzuf extraction yielded 0 jobs (likely Cloudflare block). Sending alert...")
+            self.alert_manager.send_critical_alert(
+                source=self.source_name,
+                field="cloudflare_block",
+                details="Wuzzuf yielded 0 jobs on GitHub Actions. Debug artifacts uploaded to Workflow run."
+            )
+            return []
 
         logger.info(f"=== Extracted Total Raw Jobs: {len(all_raw_jobs)} ===")
         return all_raw_jobs
