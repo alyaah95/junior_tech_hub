@@ -216,25 +216,32 @@ class WuzzufExtractor(BaseExtractor):
     def _get_total_pages(self, selector: Selector) -> int:
         try:
             jobs_count_text = selector.xpath(
-                "//strong[contains(text(), '')]/text() | "
-                "//span[contains(@class, 'css-')]/strong/text() | "
-                "//p//strong/text()"
-            ).get()
-
-            if jobs_count_text:
-                clean_num = re.sub(r'[^\d]', '', jobs_count_text)
-                if clean_num:
+                "//span[contains(@class, 'css-')]//strong/text() | "
+                "//div[contains(@class, 'css-')]//p//strong/text() | "
+                "//strong/text()"
+            ).getall()
+            
+            for text in jobs_count_text:
+                clean_num = re.sub(r'[^\d]', '', text)
+                if clean_num and len(clean_num) <= 5: 
                     total_jobs = int(clean_num)
-                    calculated_pages = math.ceil(total_jobs / 15)
-                    return min(calculated_pages, 5)
+                    if total_jobs > 0:
+                        calculated_pages = math.ceil(total_jobs / 15)
+                        return min(calculated_pages, 10)
 
-            page_numbers = selector.xpath("//ul//li//button//text() | //ul//li//a//text()").getall()
+            page_numbers = selector.xpath(
+                "//nav//ul//li//button//text() | "
+                "//nav//ul//li//a//text() | "
+                "//ul//li//button//text()"
+            ).getall()
+            
             valid_pages = [int(p.strip()) for p in page_numbers if p.strip().isdigit()]
             if valid_pages:
-                return min(max(valid_pages), 5)
+                max_page = max(valid_pages)
+                return min(max_page, 10)
 
         except Exception as e:
-            logger.warning(f"Could not parse total pages: {e}")
+            logger.warning(f"Could not parse total pages for Wuzzuf: {e}")
 
         return 1
 
