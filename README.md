@@ -1,7 +1,7 @@
 # 🚀 Automated Multi-Source Job Aggregator & AI Verification Pipeline
 
 > An enterprise-grade, localized data engineering pipeline that automates job hunting by scraping listings from **Wuzzuf** and **Bayt**, bypasses aggressive anti-bot protections (Cloudflare Turnstile), filters opportunities using **Groq LLM AI Agent**, and publishes verified junior roles directly to a public Telegram channel.
-> 🎯 **Live Demo / Channel:** https://t.me/JuniorTHub
+ 🎯 **Live Demo / Channel:** https://t.me/JuniorTHub
 
 ---
 
